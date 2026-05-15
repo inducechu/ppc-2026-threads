@@ -21,12 +21,17 @@ AlekseevAMultMatrixCRSALL::AlekseevAMultMatrixCRSALL(const InType &in) {
 bool AlekseevAMultMatrixCRSALL::ValidationImpl() {
   int rank = 0;
   MPI_Comm_rank(MPI_COMM_WORLD, &rank);
+  int global_valid = 0;
+
   if (rank == 0) {
     const auto &a = std::get<0>(GetInput());
     const auto &b = std::get<1>(GetInput());
-    return a.cols == b.rows && !a.row_ptr.empty() && !b.row_ptr.empty();
+    if (a.cols == b.rows && !a.row_ptr.empty() && !b.row_ptr.empty()) {
+      global_valid = 1;
+    }
   }
-  return true;
+  MPI_Bcast(&global_valid, 1, MPI_INT, 0, MPI_COMM_WORLD);
+  return global_valid == 1;
 }
 
 bool AlekseevAMultMatrixCRSALL::PreProcessingImpl() {
@@ -95,8 +100,9 @@ void AlekseevAMultMatrixCRSALL::GatherData(CRSMatrix &out, const InType &input,
   std::vector<int> v_displs(size, 0);
   std::vector<double> final_v;
   std::vector<std::size_t> final_c;
+  int total_elements = 0;
+
   if (rank == 0) {
-    int total_elements = 0;
     for (int i = 0; i < size; ++i) {
       v_displs[i] = total_elements;
       total_elements += all_total_counts[i];
@@ -113,12 +119,27 @@ void AlekseevAMultMatrixCRSALL::GatherData(CRSMatrix &out, const InType &input,
   if (rank == 0) {
     out.rows = std::get<0>(input).rows;
     out.cols = std::get<1>(input).cols;
-    out.values = std::move(final_v);
-    out.col_indices = std::move(final_c);
-    out.row_ptr.assign(out.rows + 1, 0);
-    for (std::size_t i = 0; i < out.rows; ++i) {
-      out.row_ptr[i + 1] = out.row_ptr[i] + static_cast<std::size_t>(all_row_sizes[i]);
-    }
+  }
+
+  MPI_Bcast(&out.rows, 1, MPI_UNSIGNED_LONG, 0, MPI_COMM_WORLD);
+  MPI_Bcast(&out.cols, 1, MPI_UNSIGNED_LONG, 0, MPI_COMM_WORLD);
+  MPI_Bcast(&total_elements, 1, MPI_INT, 0, MPI_COMM_WORLD);
+
+  if (rank != 0) {
+    final_v.resize(total_elements);
+    final_c.resize(total_elements);
+    all_row_sizes.resize(out.rows);
+  }
+
+  MPI_Bcast(final_v.data(), total_elements, MPI_DOUBLE, 0, MPI_COMM_WORLD);
+  MPI_Bcast(final_c.data(), total_elements, MPI_UNSIGNED_LONG, 0, MPI_COMM_WORLD);
+  MPI_Bcast(all_row_sizes.data(), static_cast<int>(out.rows), MPI_INT, 0, MPI_COMM_WORLD);
+
+  out.values = std::move(final_v);
+  out.col_indices = std::move(final_c);
+  out.row_ptr.assign(out.rows + 1, 0);
+  for (std::size_t i = 0; i < out.rows; ++i) {
+    out.row_ptr[i + 1] = out.row_ptr[i] + static_cast<std::size_t>(all_row_sizes[i]);
   }
 }
 
